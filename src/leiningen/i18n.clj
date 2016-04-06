@@ -18,26 +18,8 @@
 ")
 
 (defn path-join
-  [ & args ]
-  (apply str (cons (first args)
-                   (map #(str java.io.File/separator %) (rest args)))))
-
-(defn dev-resources-path
-  "Return the first path in the project's resource-paths that ends in
-  dev-resources or create dev-resources in the first :source-paths"
-  [project]
-  (or
-   (first (filter #(.endsWith % "dev-resources") (:resource-paths project)))
-   (l/abort "You must have a dev-resources directory in your project's resource-paths")))
-
-(defn dev-resources-dir
-  "Return the dev-resources-path as a file. Create the directory if it does
-  not exist"
-  [project]
-  (let [dir (io/as-file (dev-resources-path project))]
-    (if (or (.isDirectory dir) (.mkdirs dir))
-      dir
-      (l/abort (str "Could not create directory " dir)))))
+  [root & args]
+  (apply str root (map #(str java.io.File/separator %) args)))
 
 (defn bundle-package-name
   "Return the Java package name in which our resource bundles should
@@ -45,25 +27,29 @@
   project has no group, we use 'nogroup'"
   [project]
   (namespace-munge
-   (str (or (:group project) "nogroup") "."
+   (str (:group project "nogroup") "."
         (clojure.string/replace (:name project) "/" "."))))
 
-(defn copy-makefile-to-dev-resources
-  [project]
-  (let [dest (path-join (dev-resources-dir project) "Makefile.i18n")
-        makefile (io/resource "leiningen/i18n/Makefile")]
-    (spit (io/as-file dest)
-          (clojure.string/replace
-           (slurp makefile)
-           #"PACKAGE=.*"
-           (str "PACKAGE=" (bundle-package-name project))))))
+(defn makefile-i18n-path
+  [{:keys [target-path] :as project}]
+  (path-join target-path "Makefile.i18n"))
+
+(defn copy-makefile-to-target
+  [{:keys [target-path compile-path] :as  project}]
+  (.mkdirs (io/file target-path))
+  (let [package (str "PACKAGE=" (bundle-package-name project))
+        prefix (str "COMPILE_PATH=" (path-join compile-path "META-INF" "maven"))
+        contents (-> (io/resource "leiningen/i18n/Makefile")
+                     (clojure.string/replace #"PACKAGE=.*" package)
+                     (clojure.string/replace #"COMPILE_PATH=.*" prefix))]
+    (spit (io/as-file (makefile-i18n-path project))
+          contents)))
 
 (defn project-file
   "Construct a path in the project's root by appending rest to it and
   return a file"
-  [project & rest]
-  (let [root (:root project)]
-    (io/as-file (apply path-join (cons root rest)))))
+  [{:keys [root] :as project} & rest]
+  (io/as-file (apply path-join root rest)))
 
 (defn ensure-contains-line
   "Make sure that file contains the given line, if not append it. If file
@@ -82,28 +68,29 @@
   "Add a line to include Makefile.i18n to an existing Makefile or create a
   new one with just the include statement"
   [project]
-  (let [include-line "include dev-resources/Makefile.i18n"
+  (let [include-line (str "include " (makefile-i18n-path project))
         makefile (project-file project "Makefile")]
     (ensure-contains-line makefile include-line)))
 
 (defn edit-gitignore
   "Add generated i18n files that should not be checked in to .gitignore"
   [project]
-  (let [line "/resources/locales.clj"
-        gitignore (project-file project ".gitignore")]
-    (ensure-contains-line gitignore line)))
+  (let [gitignore (project-file project ".gitignore")]
+    (ensure-contains-line gitignore "/resources/locales.clj")
+    (ensure-contains-line gitignore "/mp-*")))
 
 (defn i18n-init
   [project]
   (l/info "Setting up Makefile; don't forget to check it in")
-  (copy-makefile-to-dev-resources project)
+  (copy-makefile-to-target project)
   (edit-toplevel-makefile project)
   (edit-gitignore project))
 
 (defn i18n-make
   [project]
-  (l/info "Running 'make i18n'")
-  (sh "make" "i18n"))
+  (l/debug "Running 'make i18n'")
+  (copy-makefile-to-target project)
+  (sh "make" "i18n" "-f" (makefile-i18n-path project)))
 
 (defn abort
   [& rest]
@@ -112,7 +99,7 @@
 (defn i18n
   [project command]
 
-  (if-not (:root project)
+  (when-not (:root project)
     (abort "The i18n plugin can only be run inside a project"))
 
   (condp = command
